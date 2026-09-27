@@ -1,6 +1,6 @@
 @_6wave_backend_HostAddress = http://localhost:5133
 
-GET {{_6wave_backend_HostAddress}}/weatherforecast/
+GET {{_6wave_backend_HostAddress}}/health
 Accept: application/json
 
 ###
