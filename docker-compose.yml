@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: sixwave
+      POSTGRES_PASSWORD: devsixwave
+      POSTGRES_DB: sixwave
+    ports:
+      - "5433:5432"
+    volumes:
+      - sixwave_pg_data:/var/lib/postgresql/data
+
+volumes:
+  sixwave_pg_data:
