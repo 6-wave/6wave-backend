@@ -1,0 +1,23 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Deploy: push this repo to GitHub, then in Render choose New + → Blueprint.
+services:
+  - type: web
+    name: sixwave-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter # free tier sleeps after 15 min idle, which breaks admin sessions and pending registrations
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Postgres connection string, e.g. from Neon or Render's own managed Postgres.
+      - key: ConnectionStrings__Default
+        sync: false
+      # The admin login. Generate the hash locally, see the backend README.
+      - key: Admin__Email
+        sync: false
+      - key: Admin__PasswordHash
+        sync: false
+      # Comma-separated list of the deployed frontend URLs allowed to call this API.
+      - key: Cors__AllowedOrigins
+        sync: false

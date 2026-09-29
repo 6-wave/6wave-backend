@@ -10,6 +10,12 @@ using SixWaveBackend.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Render (and most hosts) tell the container which port to listen on via $PORT.
+// Locally this is unset, so launchSettings.json's port is used instead.
+var port = Environment.GetEnvironmentVariable("PORT");
+if (!string.IsNullOrEmpty(port))
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+
 // Add services to the container.
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
@@ -18,18 +24,22 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
+var allowedOrigins = (builder.Configuration["Cors:AllowedOrigins"] ?? "http://localhost:3000,http://localhost:5173")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
-        policy.WithOrigins("http://localhost:3000", "http://localhost:5173")
-            .AllowAnyHeader().AllowAnyMethod().AllowCredentials());
+        policy.WithOrigins(allowedOrigins).AllowAnyHeader().AllowAnyMethod().AllowCredentials());
 });
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
         options.Cookie.Name = "sixwave_admin";
         options.Cookie.HttpOnly = true;
-        options.Cookie.SameSite = SameSiteMode.Lax;
+        // Locally, frontend and backend are different ports of "localhost" - same site, Lax works.
+        // Deployed, they're different domains entirely - that needs None+Secure (HTTPS-only) instead.
+        options.Cookie.SameSite = builder.Environment.IsDevelopment() ? SameSiteMode.Lax : SameSiteMode.None;
+        options.Cookie.SecurePolicy = builder.Environment.IsDevelopment() ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
         options.ExpireTimeSpan = TimeSpan.FromDays(7);
         options.SlidingExpiration = true;
         options.Events.OnRedirectToLogin = ctx =>
@@ -56,13 +66,22 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+// Apply any pending migrations on startup, so a deploy always leaves the
+// database schema in sync with the code - no manual migration step needed.
+using (var scope = app.Services.CreateScope())
+{
+    scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.Migrate();
+}
+
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    // Only meaningful locally: in production the host (Render) already terminates
+    // HTTPS at its edge and only ever forwards plain HTTP to the container.
+    app.UseHttpsRedirection();
 }
 
-app.UseHttpsRedirection();
 app.UseCors("Frontend");
 app.UseRateLimiter();
 app.UseAuthentication();
