@@ -76,6 +76,15 @@ app.MapGet("/api/registrations/{id:guid}/qr", async (Guid id, AppDbContext db) =
 })
 .WithName("GetRegistrationQr");
 
+app.MapGet("/api/registrations/lookup", async (string reference, string phone, AppDbContext db) =>
+{
+    var normalizedReference = reference.Trim().ToUpperInvariant();
+    var registration = await db.Registrations.FirstOrDefaultAsync(r =>
+        r.Reference == normalizedReference && r.PhoneNumber == phone.Trim());
+    return registration is null ? Results.NotFound() : Results.Ok(registration.ToResponse());
+})
+.WithName("LookupRegistration");
+
 app.Run();
 
 // Needed so WebApplicationFactory<Program> can find this entry point from the test project.
