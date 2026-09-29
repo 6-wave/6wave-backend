@@ -1,3 +1,8 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using SixWaveBackend.Data;
 using SixWaveBackend.Models;
@@ -13,7 +18,37 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("Frontend", policy =>
-        policy.WithOrigins("http://localhost:3000").AllowAnyHeader().AllowAnyMethod());
+        policy.WithOrigins("http://localhost:3000", "http://localhost:5173")
+            .AllowAnyHeader().AllowAnyMethod().AllowCredentials());
+});
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "sixwave_admin";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        options.ExpireTimeSpan = TimeSpan.FromDays(7);
+        options.SlidingExpiration = true;
+        options.Events.OnRedirectToLogin = ctx =>
+        {
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        };
+    });
+builder.Services.AddAuthorization();
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("login", limiterOptions =>
+    {
+        limiterOptions.PermitLimit = 5;
+        limiterOptions.Window = TimeSpan.FromMinutes(1);
+        limiterOptions.QueueLimit = 0;
+    });
+    options.OnRejected = (ctx, _) =>
+    {
+        ctx.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        return ValueTask.CompletedTask;
+    };
 });
 
 var app = builder.Build();
@@ -26,8 +61,56 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 app.UseCors("Frontend");
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.MapHealthChecks("/health");
+
+app.MapPost("/api/admin/auth/login", async (AdminLoginRequest request, IConfiguration config, HttpContext http) =>
+{
+    var adminEmail = config["Admin:Email"];
+    var adminPasswordHash = config["Admin:PasswordHash"];
+    if (string.IsNullOrEmpty(adminEmail) || string.IsNullOrEmpty(adminPasswordHash))
+        return Results.Problem("Admin account not configured", statusCode: 500);
+
+    var hasher = new PasswordHasher<object>();
+    var passwordResult = hasher.VerifyHashedPassword(null!, adminPasswordHash, request.Password);
+    var emailMatches = string.Equals(request.Email.Trim(), adminEmail, StringComparison.OrdinalIgnoreCase);
+    if (!emailMatches || passwordResult == PasswordVerificationResult.Failed)
+        return Results.Unauthorized();
+
+    Claim[] claims =
+    [
+        new(ClaimTypes.NameIdentifier, "admin"),
+        new(ClaimTypes.Name, "Admin"),
+        new(ClaimTypes.Email, adminEmail),
+    ];
+    var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+    await http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
+
+    return Results.Ok(new AdminUserResponse("admin", "Admin", adminEmail));
+})
+.RequireRateLimiting("login")
+.WithName("AdminLogin");
+
+app.MapGet("/api/admin/auth/me", (ClaimsPrincipal user) =>
+{
+    var response = new AdminUserResponse(
+        user.FindFirstValue(ClaimTypes.NameIdentifier)!,
+        user.FindFirstValue(ClaimTypes.Name)!,
+        user.FindFirstValue(ClaimTypes.Email)!);
+    return Results.Ok(response);
+})
+.RequireAuthorization()
+.WithName("AdminMe");
+
+app.MapPost("/api/admin/auth/logout", async (HttpContext http) =>
+{
+    await http.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    return Results.Ok();
+})
+.WithName("AdminLogout");
 
 app.MapPost("/api/registrations", async (CreateRegistrationRequest request, AppDbContext db) =>
 {
