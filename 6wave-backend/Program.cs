@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Identity;
@@ -13,6 +14,8 @@ var builder = WebApplication.CreateBuilder(args);
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 builder.Services.AddHealthChecks();
+builder.Services.ConfigureHttpJsonOptions(options =>
+    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Default")));
 builder.Services.AddCors(options =>
@@ -133,7 +136,7 @@ app.MapPost("/api/registrations", async (CreateRegistrationRequest request, AppD
     };
 
     for (var i = 0; i < option.Admits; i++)
-        registration.Tickets.Add(new Ticket { RegistrationId = registration.Id, BackupCode = Codes.GenerateBackupCode() });
+        registration.Tickets.Add(new Ticket { RegistrationId = registration.Id, BackupCode = Codes.GenerateBackupCode(), GuestIndex = i });
 
     db.Registrations.Add(registration);
     await db.SaveChangesAsync();
@@ -167,6 +170,100 @@ app.MapGet("/api/registrations/lookup", async (string reference, string phone, A
     return registration is null ? Results.NotFound() : Results.Ok(registration.ToResponse());
 })
 .WithName("LookupRegistration");
+
+static AdminUserDetail ToDetail(Registration r) => new(
+    r.ToAdminUserRow(),
+    r.Tickets.OrderBy(t => t.GuestIndex).Select(t => t.ToAdminPass()).ToList(),
+    r.Payments.OrderByDescending(p => p.CreatedAt).Select(p => p.ToAdminTransaction()).ToList());
+
+static string DigitsOnly(string s) => new(s.Where(char.IsDigit).ToArray());
+
+var adminGroup = app.MapGroup("/api/admin").RequireAuthorization();
+
+adminGroup.MapGet("/users", async (string? q, string? status, string? kind, int? page, AppDbContext db) =>
+{
+    const int pageSize = 10;
+    var digitsQuery = string.IsNullOrWhiteSpace(q) ? null : DigitsOnly(q);
+
+    var registrations = await db.Registrations.Include(r => r.Tickets).ToListAsync();
+    var rows = registrations
+        .Where(r => status switch
+        {
+            "cancelled" => r.Status == RegistrationStatus.Cancelled,
+            "paid" => r.Status != RegistrationStatus.Cancelled && r.PaymentStatus == PaymentStatus.Paid,
+            "pending" => r.Status != RegistrationStatus.Cancelled && r.PaymentStatus == PaymentStatus.Pending,
+            _ => true,
+        })
+        .Where(r => kind is null || string.Equals(Catalog.Options.First(o => o.Id == r.OptionId).Kind.ToString(), kind, StringComparison.OrdinalIgnoreCase))
+        .Where(r => string.IsNullOrWhiteSpace(q) ||
+            r.FullName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            r.Reference.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            r.Email.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            (digitsQuery!.Length > 0 && DigitsOnly(r.PhoneNumber).Contains(digitsQuery)))
+        .Select(r => r.ToAdminUserRow())
+        .ToList();
+
+    var currentPage = Math.Max(1, page ?? 1);
+    var items = rows.Skip((currentPage - 1) * pageSize).Take(pageSize).ToList();
+    return Results.Ok(new PagedResult<AdminUserRow>(items, rows.Count, currentPage, pageSize));
+})
+.WithName("AdminListUsers");
+
+adminGroup.MapGet("/users/{id:guid}", async (Guid id, AppDbContext db) =>
+{
+    var registration = await db.Registrations.Include(r => r.Tickets).Include(r => r.Payments)
+        .FirstOrDefaultAsync(r => r.Id == id);
+    return registration is null ? Results.NotFound() : Results.Ok(ToDetail(registration));
+})
+.WithName("AdminGetUser");
+
+adminGroup.MapPost("/users/{id:guid}/payments", async (Guid id, RecordPaymentRequest request, ClaimsPrincipal admin, AppDbContext db) =>
+{
+    var registration = await db.Registrations.Include(r => r.Tickets).Include(r => r.Payments)
+        .FirstOrDefaultAsync(r => r.Id == id);
+    if (registration is null) return Results.NotFound();
+    if (registration.Status == RegistrationStatus.Cancelled)
+        return Results.Conflict(new { error = "This registration is cancelled." });
+    if (registration.PaymentStatus == PaymentStatus.Paid)
+        return Results.Conflict(new { error = "This registration is already paid." });
+    if (!Enum.TryParse<PaymentMethod>(request.Method, ignoreCase: true, out var method) ||
+        method is not (PaymentMethod.Pos or PaymentMethod.Cash or PaymentMethod.Bank_Transfer))
+        return Results.BadRequest(new { error = "Choose a payment method." });
+
+    var option = Catalog.Options.First(o => o.Id == registration.OptionId);
+    db.Payments.Add(new Payment
+    {
+        Reference = Codes.GeneratePaymentReference(),
+        RegistrationId = registration.Id,
+        AmountNaira = option.PriceNaira,
+        Method = method,
+        RecordedBy = admin.FindFirstValue(ClaimTypes.Name),
+    });
+    registration.PaymentStatus = PaymentStatus.Paid;
+    await db.SaveChangesAsync();
+
+    return Results.Ok(ToDetail(registration));
+})
+.WithName("AdminRecordPayment");
+
+adminGroup.MapPost("/users/{id:guid}/cancel", async (Guid id, AppDbContext db) =>
+{
+    var registration = await db.Registrations.Include(r => r.Tickets).Include(r => r.Payments)
+        .FirstOrDefaultAsync(r => r.Id == id);
+    if (registration is null) return Results.NotFound();
+    if (registration.Status == RegistrationStatus.Cancelled)
+        return Results.Conflict(new { error = "Already cancelled." });
+    if (registration.PaymentStatus == PaymentStatus.Paid)
+        return Results.Conflict(new { error = "A paid registration needs a refund, not a cancellation." });
+
+    registration.Status = RegistrationStatus.Cancelled;
+    foreach (var ticket in registration.Tickets)
+        ticket.Status = TicketStatus.Void;
+    await db.SaveChangesAsync();
+
+    return Results.Ok(ToDetail(registration));
+})
+.WithName("AdminCancelRegistration");
 
 app.Run();
 

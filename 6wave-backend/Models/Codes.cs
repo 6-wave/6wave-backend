@@ -22,6 +22,14 @@ public static class Codes
         return new string(chars);
     }
 
+    public static string GeneratePaymentReference()
+    {
+        Span<char> chars = stackalloc char[6];
+        for (var i = 0; i < 6; i++)
+            chars[i] = Alphabet[RandomNumberGenerator.GetInt32(Alphabet.Length)];
+        return $"MAN-{new string(chars)}";
+    }
+
     public static string ShortenName(string fullName)
     {
         var parts = fullName.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
