@@ -265,6 +265,141 @@ adminGroup.MapPost("/users/{id:guid}/cancel", async (Guid id, AppDbContext db) =
 })
 .WithName("AdminCancelRegistration");
 
+static string CsvCell(string value)
+{
+    var s = value;
+    if (s.Length > 0 && "=+-@\t\r".Contains(s[0])) s = "'" + s;
+    if (s.Contains('"') || s.Contains(',') || s.Contains('\n')) s = "\"" + s.Replace("\"", "\"\"") + "\"";
+    return s;
+}
+
+adminGroup.MapGet("/dashboard", async (AppDbContext db) =>
+{
+    var registrations = await db.Registrations.Include(r => r.Tickets).Include(r => r.Payments).ToListAsync();
+    var live = registrations.Where(r => r.Status != RegistrationStatus.Cancelled).ToList();
+    var success = registrations.SelectMany(r => r.Payments).Where(p => p.Status == PaymentTransactionStatus.Success).ToList();
+    var activeTickets = registrations.SelectMany(r => r.Tickets).Where(t => t.Status != TicketStatus.Void).ToList();
+    var lagos = TimeZoneInfo.FindSystemTimeZoneById("Africa/Lagos");
+
+    PurchaseKind[] kinds = [PurchaseKind.Ticket, PurchaseKind.Group, PurchaseKind.Table];
+    var byKind = kinds.Select(kind =>
+    {
+        var ofKind = live.Where(r => Catalog.Options.First(o => o.Id == r.OptionId).Kind == kind).ToList();
+        var revenue = ofKind.Where(r => r.PaymentStatus == PaymentStatus.Paid)
+            .Sum(r => Catalog.Options.First(o => o.Id == r.OptionId).PriceNaira);
+        return new AdminKindStat(kind.ToString().ToUpperInvariant(), ofKind.Count, revenue);
+    }).ToList();
+
+    PaymentMethod[] methods = [PaymentMethod.Paystack, PaymentMethod.Pos, PaymentMethod.Cash, PaymentMethod.Bank_Transfer];
+    var byMethod = methods.Select(method => new AdminMethodStat(
+        method.ToString().ToUpperInvariant(), success.Where(p => p.Method == method).Sum(p => p.AmountNaira))).ToList();
+
+    var perDay = new List<AdminDayStat>();
+    for (var i = 13; i >= 0; i--)
+    {
+        var day = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow.AddDays(-i), lagos).ToString("yyyy-MM-dd");
+        var count = registrations.Count(r => TimeZoneInfo.ConvertTime(r.CreatedAt, lagos).ToString("yyyy-MM-dd") == day);
+        perDay.Add(new AdminDayStat(day, count));
+    }
+
+    var recent = registrations.SelectMany(r => r.Payments.Select(p => p.ToAdminTransactionRow(r)))
+        .OrderByDescending(t => t.CreatedAt).Take(6).ToList();
+
+    return Results.Ok(new AdminDashboard(
+        new AdminRegistrationStats(
+            live.Count,
+            live.Count(r => r.PaymentStatus == PaymentStatus.Paid),
+            live.Count(r => r.PaymentStatus == PaymentStatus.Pending),
+            registrations.Count - live.Count),
+        success.Sum(p => p.AmountNaira),
+        live.Where(r => r.PaymentStatus == PaymentStatus.Pending).Sum(r => Catalog.Options.First(o => o.Id == r.OptionId).PriceNaira),
+        new AdminCheckedInStats(activeTickets.Count(t => t.Status == TicketStatus.Used), activeTickets.Count),
+        byKind, byMethod, perDay, recent));
+})
+.WithName("AdminDashboard");
+
+adminGroup.MapGet("/transactions", async (string? q, string? status, string? method, int? page, AppDbContext db) =>
+{
+    const int pageSize = 10;
+    var payments = await db.Payments.Include(p => p.Registration).ToListAsync();
+    var rows = payments.Select(p => p.ToAdminTransactionRow(p.Registration!))
+        .Where(t => status is null || string.Equals(t.Status, status, StringComparison.OrdinalIgnoreCase))
+        .Where(t => method is null || string.Equals(t.Method, method, StringComparison.OrdinalIgnoreCase))
+        .Where(t => string.IsNullOrWhiteSpace(q) ||
+            t.Reference.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            t.UserName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            t.UserReference.Contains(q, StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(t => t.CreatedAt)
+        .ToList();
+
+    var success = rows.Where(t => t.Status == "SUCCESS").ToList();
+    var currentPage = Math.Max(1, page ?? 1);
+    var items = rows.Skip((currentPage - 1) * pageSize).Take(pageSize).ToList();
+    return Results.Ok(new AdminTransactionsPage(items, rows.Count, currentPage, pageSize, success.Sum(t => t.Amount), success.Count));
+})
+.WithName("AdminListTransactions");
+
+adminGroup.MapGet("/transactions/export", async (string? q, string? status, string? method, AppDbContext db) =>
+{
+    var payments = await db.Payments.Include(p => p.Registration).ToListAsync();
+    var rows = payments.Select(p => p.ToAdminTransactionRow(p.Registration!))
+        .Where(t => status is null || string.Equals(t.Status, status, StringComparison.OrdinalIgnoreCase))
+        .Where(t => method is null || string.Equals(t.Method, method, StringComparison.OrdinalIgnoreCase))
+        .Where(t => string.IsNullOrWhiteSpace(q) ||
+            t.Reference.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            t.UserName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            t.UserReference.Contains(q, StringComparison.OrdinalIgnoreCase))
+        .OrderByDescending(t => t.CreatedAt)
+        .ToList();
+
+    string[] header = ["Reference", "Date", "Person", "Registration", "Purchase", "Amount (NGN)", "Method", "Status", "Recorded by"];
+    var lines = rows.Select(t => string.Join(',', new[]
+    {
+        t.Reference, t.CreatedAt.ToString("O"), t.UserName, t.UserReference, t.OptionLabel,
+        t.Amount.ToString(), t.Method, t.Status, t.RecordedBy ?? "",
+    }.Select(CsvCell)));
+    var csv = string.Join('\n', new[] { string.Join(',', header.Select(CsvCell)) }.Concat(lines));
+    return Results.Text(csv, "text/csv");
+})
+.WithName("AdminExportTransactions");
+
+adminGroup.MapGet("/transactions/{reference}", async (string reference, AppDbContext db) =>
+{
+    var payment = await db.Payments.Include(p => p.Registration).FirstOrDefaultAsync(p => p.Reference == reference);
+    return payment is null ? Results.NotFound() : Results.Ok(payment.ToAdminTransactionRow(payment.Registration!));
+})
+.WithName("AdminGetTransaction");
+
+adminGroup.MapGet("/passes", async (string? q, string? status, int? page, AppDbContext db) =>
+{
+    const int pageSize = 10;
+    var tickets = await db.Tickets.Include(t => t.Registration).ToListAsync();
+    var totalsByRegistration = tickets.GroupBy(t => t.RegistrationId).ToDictionary(g => g.Key, g => g.Count());
+
+    var all = tickets.Select(t =>
+    {
+        var option = Catalog.Options.First(o => o.Id == t.Registration!.OptionId);
+        return new AdminPassRow(
+            t.Id, t.RegistrationId, t.GuestIndex, t.Status.ToString().ToUpperInvariant(), t.UsedAt, null,
+            t.Registration!.FullName, t.Registration!.Reference, option.Label, totalsByRegistration[t.RegistrationId]);
+    }).ToList();
+
+    var rows = all
+        .Where(p => status is null || string.Equals(p.Status, status, StringComparison.OrdinalIgnoreCase))
+        .Where(p => string.IsNullOrWhiteSpace(q) ||
+            p.Token.ToString().Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            p.UserName.Contains(q, StringComparison.OrdinalIgnoreCase) ||
+            p.UserReference.Contains(q, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    var currentPage = Math.Max(1, page ?? 1);
+    var items = rows.Skip((currentPage - 1) * pageSize).Take(pageSize).ToList();
+    var counts = new AdminPassCounts(
+        all.Count, all.Count(p => p.Status == "USED"), all.Count(p => p.Status == "UNUSED"), all.Count(p => p.Status == "VOID"));
+    return Results.Ok(new AdminPassesPage(items, rows.Count, currentPage, pageSize, counts));
+})
+.WithName("AdminListPasses");
+
 app.Run();
 
 // Needed so WebApplicationFactory<Program> can find this entry point from the test project.
