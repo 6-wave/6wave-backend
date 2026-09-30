@@ -419,6 +419,42 @@ adminGroup.MapGet("/passes", async (string? q, string? status, int? page, AppDbC
 })
 .WithName("AdminListPasses");
 
+adminGroup.MapPost("/scan", async (ScanRequest request, AppDbContext db) =>
+{
+    var code = request.Code.Trim();
+    var ticket = Guid.TryParse(code, out var ticketId)
+        ? await db.Tickets.Include(t => t.Registration).FirstOrDefaultAsync(t => t.Id == ticketId)
+        : await db.Tickets.Include(t => t.Registration).FirstOrDefaultAsync(t => t.BackupCode == code.ToUpperInvariant());
+
+    if (ticket is null)
+        return Results.Ok(new ScanResponse("INVALID", null, null, null, null, null));
+
+    var registration = ticket.Registration!;
+    var option = Catalog.Options.First(o => o.Id == registration.OptionId);
+    var paymentStatus = registration.PaymentStatus.ToString().ToUpperInvariant();
+
+    ScanResponse Respond(string decision) =>
+        new(decision, registration.Reference, registration.FullName, registration.OptionId, paymentStatus, option.PriceNaira);
+
+    if (registration.Status == RegistrationStatus.Cancelled)
+        return Results.Ok(Respond("CANCELLED"));
+    if (registration.PaymentStatus != PaymentStatus.Paid)
+        return Results.Ok(Respond("PAYMENT_REQUIRED"));
+    if (ticket.Status != TicketStatus.Unused)
+        return Results.Ok(Respond("ALREADY_USED"));
+
+    // Atomic: only flips Unused -> Used if it's still Unused right now, so two
+    // staff scanning the same code at once can't both get GRANTED.
+    var rowsAffected = await db.Tickets
+        .Where(t => t.Id == ticket.Id && t.Status == TicketStatus.Unused)
+        .ExecuteUpdateAsync(s => s
+            .SetProperty(t => t.Status, TicketStatus.Used)
+            .SetProperty(t => t.UsedAt, DateTimeOffset.UtcNow));
+
+    return Results.Ok(Respond(rowsAffected > 0 ? "GRANTED" : "ALREADY_USED"));
+})
+.WithName("AdminScan");
+
 app.Run();
 
 // Needed so WebApplicationFactory<Program> can find this entry point from the test project.
