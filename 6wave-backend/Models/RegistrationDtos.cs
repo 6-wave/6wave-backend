@@ -20,3 +20,9 @@ public static class RegistrationMapper
         registration.OptionId, registration.PaymentStatus.ToString().ToUpperInvariant(),
         registration.Status.ToString().ToUpperInvariant(), registration.CreatedAt);
 }
+
+public record CatalogWave(string Id, string Label, string? EndsOn);
+
+public record CatalogOption(string Id, string Kind, string Label, int Admits, int PriceNaira);
+
+public record CatalogResponse(CatalogWave Wave, List<CatalogOption> Options);

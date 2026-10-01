@@ -29,8 +29,8 @@ public static class AdminMapper
         return new AdminUserRow(
             r.Id, r.Reference, r.FullName, r.PhoneNumber, r.Email,
             r.OptionId, r.PaymentStatus.ToString().ToUpperInvariant(), r.Status.ToString().ToUpperInvariant(), r.CreatedAt,
-            new AdminPurchaseOption(option.Id, option.Kind.ToString().ToUpperInvariant(), option.Label, option.PriceNaira, option.Admits),
-            option.PriceNaira,
+            new AdminPurchaseOption(option.Id, option.Kind.ToString().ToUpperInvariant(), option.Label, r.PriceNaira, option.Admits),
+            r.PriceNaira,
             r.Tickets.Count(t => t.Status == TicketStatus.Used),
             r.Tickets.Count);
     }

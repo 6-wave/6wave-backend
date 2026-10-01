@@ -134,6 +134,16 @@ app.MapPost("/api/admin/auth/logout", async (HttpContext http) =>
 })
 .WithName("AdminLogout");
 
+app.MapGet("/api/catalog", () =>
+{
+    var now = DateTimeOffset.UtcNow;
+    var wave = Catalog.CurrentWave(now);
+    return Results.Ok(new CatalogResponse(
+        new CatalogWave(wave.Id, wave.Label, wave.EndsOn?.ToString("yyyy-MM-dd")),
+        Catalog.Options.Select(o => new CatalogOption(o.Id, o.Kind.ToString().ToUpperInvariant(), o.Label, o.Admits, wave.Prices[o.Id])).ToList()));
+})
+.WithName("GetCatalog");
+
 app.MapPost("/api/registrations", async (CreateRegistrationRequest request, AppDbContext db) =>
 {
     var option = Catalog.Options.FirstOrDefault(o => o.Id == request.OptionId);
@@ -152,6 +162,7 @@ app.MapPost("/api/registrations", async (CreateRegistrationRequest request, AppD
         Email = request.Email.Trim(),
         PhoneNumber = request.Phone.Trim(),
         OptionId = option.Id,
+        PriceNaira = Catalog.PriceFor(option.Id, DateTimeOffset.UtcNow),
     };
 
     for (var i = 0; i < option.Admits; i++)
@@ -249,12 +260,11 @@ adminGroup.MapPost("/users/{id:guid}/payments", async (Guid id, RecordPaymentReq
         method is not (PaymentMethod.Pos or PaymentMethod.Cash or PaymentMethod.Bank_Transfer))
         return Results.BadRequest(new { error = "Choose a payment method." });
 
-    var option = Catalog.Options.First(o => o.Id == registration.OptionId);
     db.Payments.Add(new Payment
     {
         Reference = Codes.GeneratePaymentReference(),
         RegistrationId = registration.Id,
-        AmountNaira = option.PriceNaira,
+        AmountNaira = registration.PriceNaira,
         Method = method,
         RecordedBy = admin.FindFirstValue(ClaimTypes.Name),
     });
@@ -305,7 +315,7 @@ adminGroup.MapGet("/dashboard", async (AppDbContext db) =>
     {
         var ofKind = live.Where(r => Catalog.Options.First(o => o.Id == r.OptionId).Kind == kind).ToList();
         var revenue = ofKind.Where(r => r.PaymentStatus == PaymentStatus.Paid)
-            .Sum(r => Catalog.Options.First(o => o.Id == r.OptionId).PriceNaira);
+            .Sum(r => r.PriceNaira);
         return new AdminKindStat(kind.ToString().ToUpperInvariant(), ofKind.Count, revenue);
     }).ToList();
 
@@ -331,7 +341,7 @@ adminGroup.MapGet("/dashboard", async (AppDbContext db) =>
             live.Count(r => r.PaymentStatus == PaymentStatus.Pending),
             registrations.Count - live.Count),
         success.Sum(p => p.AmountNaira),
-        live.Where(r => r.PaymentStatus == PaymentStatus.Pending).Sum(r => Catalog.Options.First(o => o.Id == r.OptionId).PriceNaira),
+        live.Where(r => r.PaymentStatus == PaymentStatus.Pending).Sum(r => r.PriceNaira),
         new AdminCheckedInStats(activeTickets.Count(t => t.Status == TicketStatus.Used), activeTickets.Count),
         byKind, byMethod, perDay, recent));
 })
@@ -434,7 +444,7 @@ adminGroup.MapPost("/scan", async (ScanRequest request, AppDbContext db) =>
     var paymentStatus = registration.PaymentStatus.ToString().ToUpperInvariant();
 
     ScanResponse Respond(string decision) =>
-        new(decision, registration.Reference, registration.FullName, registration.OptionId, paymentStatus, option.PriceNaira);
+        new(decision, registration.Reference, registration.FullName, registration.OptionId, paymentStatus, registration.PriceNaira);
 
     if (registration.Status == RegistrationStatus.Cancelled)
         return Results.Ok(Respond("CANCELLED"));
