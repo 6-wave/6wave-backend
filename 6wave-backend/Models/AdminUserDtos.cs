@@ -25,12 +25,13 @@ public static class AdminMapper
 {
     public static AdminUserRow ToAdminUserRow(this Registration r)
     {
+        var price = Catalog.AmountDue(r, DateTimeOffset.UtcNow);
         var option = Catalog.Options.First(o => o.Id == r.OptionId);
         return new AdminUserRow(
             r.Id, r.Reference, r.FullName, r.PhoneNumber, r.Email,
             r.OptionId, r.PaymentStatus.ToString().ToUpperInvariant(), r.Status.ToString().ToUpperInvariant(), r.CreatedAt,
-            new AdminPurchaseOption(option.Id, option.Kind.ToString().ToUpperInvariant(), option.Label, r.PriceNaira, option.Admits),
-            r.PriceNaira,
+            new AdminPurchaseOption(option.Id, option.Kind.ToString().ToUpperInvariant(), option.Label, price, option.Admits),
+            price,
             r.Tickets.Count(t => t.Status == TicketStatus.Used),
             r.Tickets.Count);
     }

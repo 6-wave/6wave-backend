@@ -59,4 +59,11 @@ public static class Catalog
     }
 
     public static int PriceFor(string optionId, DateTimeOffset now) => CurrentWave(now).Prices[optionId];
+
+    /// <summary>
+    /// What a registration costs. Paid ones keep the price they were paid at; unpaid ones owe the price of the
+    /// wave on sale today, so missing a wave's deadline means paying the next wave's price.
+    /// </summary>
+    public static int AmountDue(Registration r, DateTimeOffset now) =>
+        r.PaymentStatus == PaymentStatus.Paid ? r.PriceNaira : PriceFor(r.OptionId, now);
 }

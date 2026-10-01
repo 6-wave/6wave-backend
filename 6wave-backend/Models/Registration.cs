@@ -38,7 +38,7 @@ public class Registration
     public required string Email { get; set; }
     public required string PhoneNumber { get; set; }
     public required string OptionId { get; set; }
-    /// <summary>The price in force when this was booked. Wave changes never touch it.</summary>
+    /// <summary>The price it was paid at. Only final once paid: see <see cref="Catalog.AmountDue"/>.</summary>
     public int PriceNaira { get; set; }
     public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Pending;
     public RegistrationStatus Status { get; set; } = RegistrationStatus.Confirmed;

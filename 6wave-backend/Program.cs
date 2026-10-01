@@ -260,6 +260,8 @@ adminGroup.MapPost("/users/{id:guid}/payments", async (Guid id, RecordPaymentReq
         method is not (PaymentMethod.Pos or PaymentMethod.Cash or PaymentMethod.Bank_Transfer))
         return Results.BadRequest(new { error = "Choose a payment method." });
 
+    // The price locks now, at the wave on sale when the payment is recorded.
+    registration.PriceNaira = Catalog.PriceFor(registration.OptionId, DateTimeOffset.UtcNow);
     db.Payments.Add(new Payment
     {
         Reference = Codes.GeneratePaymentReference(),
@@ -341,7 +343,7 @@ adminGroup.MapGet("/dashboard", async (AppDbContext db) =>
             live.Count(r => r.PaymentStatus == PaymentStatus.Pending),
             registrations.Count - live.Count),
         success.Sum(p => p.AmountNaira),
-        live.Where(r => r.PaymentStatus == PaymentStatus.Pending).Sum(r => r.PriceNaira),
+        live.Where(r => r.PaymentStatus == PaymentStatus.Pending).Sum(r => Catalog.AmountDue(r, DateTimeOffset.UtcNow)),
         new AdminCheckedInStats(activeTickets.Count(t => t.Status == TicketStatus.Used), activeTickets.Count),
         byKind, byMethod, perDay, recent));
 })
@@ -444,7 +446,7 @@ adminGroup.MapPost("/scan", async (ScanRequest request, AppDbContext db) =>
     var paymentStatus = registration.PaymentStatus.ToString().ToUpperInvariant();
 
     ScanResponse Respond(string decision) =>
-        new(decision, registration.Reference, registration.FullName, registration.OptionId, paymentStatus, registration.PriceNaira);
+        new(decision, registration.Reference, registration.FullName, registration.OptionId, paymentStatus, Catalog.AmountDue(registration, DateTimeOffset.UtcNow));
 
     if (registration.Status == RegistrationStatus.Cancelled)
         return Results.Ok(Respond("CANCELLED"));
