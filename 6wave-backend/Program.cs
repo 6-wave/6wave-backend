@@ -155,6 +155,17 @@ app.MapPost("/api/registrations", async (CreateRegistrationRequest request, AppD
         string.IsNullOrWhiteSpace(request.Email))
         return Results.BadRequest(new { error = "fullName, phone and email are required" });
 
+    // One live registration per email and per phone number. Cancelled ones don't count.
+    // Compared in memory because phones are stored as typed ("0816 639 5695" vs "+234816...").
+    var email = request.Email.Trim();
+    var phoneKey = PhoneKey(request.Phone);
+    var contacts = await db.Registrations
+        .Where(r => r.Status != RegistrationStatus.Cancelled)
+        .Select(r => new { r.Email, r.PhoneNumber })
+        .ToListAsync();
+    if (contacts.Any(c => string.Equals(c.Email, email, StringComparison.OrdinalIgnoreCase) || PhoneKey(c.PhoneNumber) == phoneKey))
+        return Results.Conflict(new { error = "This email or phone number is already registered. Open your registration with your reference and phone number instead." });
+
     var registration = new Registration
     {
         Reference = Codes.GenerateReference(),
@@ -205,6 +216,13 @@ static AdminUserDetail ToDetail(Registration r) => new(
     r.ToAdminUserRow(),
     r.Tickets.OrderBy(t => t.GuestIndex).Select(t => t.ToAdminPass()).ToList(),
     r.Payments.OrderByDescending(p => p.CreatedAt).Select(p => p.ToAdminTransaction()).ToList());
+
+// Last 10 digits, so 0816..., +234816... and 816... all match.
+static string PhoneKey(string phone)
+{
+    var digits = DigitsOnly(phone);
+    return digits.Length > 10 ? digits[^10..] : digits;
+}
 
 static string DigitsOnly(string s) => new(s.Where(char.IsDigit).ToArray());
 
